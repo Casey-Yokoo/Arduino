@@ -49,17 +49,16 @@ SSD1306AsciiAvrI2c oled;
 
 // Pass our oneWire reference to Dallas Temperature. 
 #define ONE_WIRE_BUS 5 // Temperature Sensor
+#define SENSER_BIT 11 // 9, 10, 11, 12 : 0.5℃, 0.25℃, 0.125℃, 0.0625℃
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
-// DeviceAddress temp1 = {0x28,0xFF,0x70,0x3E,0xA8,0x15,0x3,0x5A};
-DeviceAddress temp1 = {0x28,0x10,0x1F,0x49,0xF6,0xD4,0x3C,0x7};
 #define TEMP_INTERVAL 3000
 
 // Auto / Manual
 #define AUTO_BUS 4
 #define SIGN_AUTO "AUTO"
 #define SIGN_MANUAL "MAN "
-boolean auto_man = true;
+boolean statusAuto = true;
 unsigned long lastButtonPress = 0;
 
 // Encoder
@@ -67,13 +66,11 @@ unsigned long lastButtonPress = 0;
 #define ENC_BUS_DT 3
 #define ENC_TEMP_HIGH 50
 #define ENC_TEMP_LOW 20
-int encoder_clk;
-int encoder_clk_last;
 
 // For relay. 
 #define RELAY_BUS 6
-boolean relay_state = true;
-boolean relay_state_old = true;
+boolean relay_state = false;
+boolean relay_state_old = false;
 
 void setup() {
   // For relay. 
@@ -83,24 +80,16 @@ void setup() {
   pinMode(AUTO_BUS, INPUT_PULLUP);
 
   // Encoder
-  pinMode (ENC_BUS_CLK, INPUT);
-  pinMode (ENC_BUS_DT, INPUT);
-  encoder_clk_last = digitalRead(ENC_BUS_CLK);
+  pinMode (ENC_BUS_CLK, INPUT_PULLUP);
+  pinMode (ENC_BUS_DT, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_BUS_CLK), getEncoderVal, CHANGE);
 
-  oled.begin(&Adafruit128x32, I2C_ADDRESS);  //こっちにすると文字高さ２倍
-  //  oled.begin(&Adafruit128x64, I2C_ADDRESS);  //これは小さくぎっちりサイズ
-  oled.setFont(System5x7);      //文字フォント調べるか
-  // oled.setFont(TimesNewRoman16);
+  oled.begin(&Adafruit128x32, I2C_ADDRESS);
+  oled.setFont(System5x7);
   oled.clear();
 
   // Start up the DallasTemperature library
-  sensors.begin();
-
-  // Open serial communications and wait for port to open:
-  // Serial.begin(9600);
-  // while (!Serial) {
-  //   ; // wait for serial port to connect. Needed for native USB port only
-  // }
+  sensors.setResolution(SENSER_BIT);
 }
 
 void loop() {
@@ -115,16 +104,15 @@ void loop() {
   // Auto / Manual
   if(digitalRead(AUTO_BUS) == LOW ){
     if (millis() - lastButtonPress > 500) {
-      auto_man = !auto_man;
+      statusAuto = !statusAuto;
       tempT1 = floor(tempT1);
-      encoder_clk_last = encoder_clk;
       oled.clear();
     }
     lastButtonPress = millis();
   }
-  String auto_man_sign = SIGN_MANUAL;
-  if (auto_man == 1) {
-    auto_man_sign = SIGN_AUTO;
+  String statusAuto_sign = SIGN_MANUAL;
+  if (statusAuto) {
+    statusAuto_sign = SIGN_AUTO;
     tempT1 = TERM_TEMP_01;
     if(time_hour >= TERM_02)
     {
@@ -134,35 +122,12 @@ void loop() {
     {
       tempT1 = TERM_TEMP_03;
     }
-    getTemp();
   }
-  else
-  { 
-    // Get encoder val
-    float delta_target_temp = 0;
-    encoder_clk = digitalRead(ENC_BUS_CLK);
-    if (encoder_clk != encoder_clk_last) {
-      if (encoder_clk != digitalRead(ENC_BUS_DT)) {
-        delta_target_temp = 1;
-      } else {
-        delta_target_temp = -1;
-      }
-      encoder_clk_last = encoder_clk;
-    }
-      else
-    {
-      getTemp();
-    }
-    if (delta_target_temp != 0) {
-      tempT1 = tempT1 + delta_target_temp;
-      if(tempT1 < ENC_TEMP_LOW){
-        tempT1 = ENC_TEMP_LOW;
-      }
-      if(tempT1 > ENC_TEMP_HIGH){
-        tempT1 = ENC_TEMP_HIGH;
-      }       
-      time_lastChecked = time;
-    }
+  if (time - time_lastChecked > TEMP_INTERVAL){
+    // call Temperaturesensors
+    sensors.requestTemperatures();
+    tempC1 = sensors.getTempCByIndex(0);
+    time_lastChecked = time;
   }
 
   // Relay operation
@@ -170,7 +135,7 @@ void loop() {
   if(tempC1 < tempT1)
   {
     relay_state = false;
-  } 
+  }
   if (relay_state != relay_state_old) {
     digitalWrite(RELAY_BUS, relay_state);
     relay_state_old = relay_state;
@@ -186,7 +151,7 @@ void loop() {
   oledString1 += " "; 
   oledString1 += String(tempC1,1);
 
-  oledString2 = auto_man_sign;
+  oledString2 = statusAuto_sign;
   oledString2 += "  "; 
   oledString2 += String(tempT1,1); 
 
@@ -195,18 +160,6 @@ void loop() {
   oled.println(oledString1);
   oled.setCursor(1,2);
   oled.println(oledString2);
-
-  // For debug
-  // String debugString;
-  // debugString += String(time_min);
-  // debugString += ",";
-  // debugString += tempC1;
-  // debugString += ",";
-  // debugString += auto_man;
-  // Serial.println(debugString);
-
-  //delay(60000);//60000msec待機(60秒待機)
-  //delay(3000);//3000msec待機(3秒待機)
 }
 
 // numに数値を、zeroCountに桁数を指定する。
@@ -217,11 +170,18 @@ String strPad2(unsigned int num,unsigned int zeroCount){
   return tmp;
 }
 
-void getTemp(){
-  if (time - time_lastChecked > TEMP_INTERVAL){
-    // call Temperaturesensors
-    sensors.requestTemperatures(); // Send the command to get temperatures
-    tempC1 = sensors.getTempC(temp1);
-    time_lastChecked = time;
+void getEncoderVal(){
+  if(!statusAuto){
+    if(digitalRead(ENC_BUS_CLK) ^ digitalRead(ENC_BUS_DT)) {
+      tempT1++;
+    } else {
+      tempT1--;
+    }
+    if(tempT1 < ENC_TEMP_LOW){
+      tempT1 = ENC_TEMP_LOW;
+    }
+    if(tempT1 > ENC_TEMP_HIGH){
+      tempT1 = ENC_TEMP_HIGH;
+    } 
   }
 }
